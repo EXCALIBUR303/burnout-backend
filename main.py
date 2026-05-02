@@ -8,28 +8,50 @@ import jwt
 import os
 from datetime import datetime, timedelta, timezone
 
-# ── Gemini AI setup (optional — falls back to offline if key not set) ──────────
+# ── Gemini AI via REST API (no extra packages — uses stdlib urllib) ────────────
+import json
+import urllib.request
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-_gemini_model = None
-if GEMINI_API_KEY:
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    "gemini-1.5-flash:generateContent?key={key}"
+)
+GEMINI_SYSTEM = (
+    "You are a compassionate AI wellness assistant for Burnout/AI, a student mental-health app at Woxsen University. "
+    "Your role: provide empathetic, evidence-based advice about stress, burnout, sleep, study habits, anxiety, and academic pressure. "
+    "Keep replies concise (2-4 sentences max), warm, and actionable. "
+    "If someone sounds in crisis, gently direct them to the free Woxsen counselling service "
+    "(wellness.centre@woxsen.edu.in / 9049980927). "
+    "Never diagnose. Remind users you are an AI, not a replacement for professional help. "
+    "Speak like a supportive senior student who knows a lot about wellbeing."
+)
+
+def gemini_chat(message: str) -> str | None:
+    """Call Gemini REST API. Returns reply text or None on failure."""
+    if not GEMINI_API_KEY:
+        return None
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-        _gemini_model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            system_instruction=(
-                "You are a compassionate AI wellness assistant for Burnout/AI, a student mental-health app at Woxsen University. "
-                "Your role: provide empathetic, evidence-based advice about stress, burnout, sleep, study habits, anxiety, and academic pressure. "
-                "Keep replies concise (2-4 sentences max), warm, and actionable. "
-                "If someone sounds in crisis, gently direct them to the free Woxsen counselling service (wellness.centre@woxsen.edu.in / 9049980927). "
-                "Never diagnose. Always remind users you're an AI, not a replacement for professional help. "
-                "Use encouraging, non-clinical language. Speak like a supportive senior student who happens to know a lot about wellbeing."
-            ),
+        payload = json.dumps({
+            "system_instruction": {"parts": [{"text": GEMINI_SYSTEM}]},
+            "contents": [{"parts": [{"text": message}]}],
+            "generationConfig": {"maxOutputTokens": 200, "temperature": 0.7},
+        }).encode()
+        req = urllib.request.Request(
+            GEMINI_URL.format(key=GEMINI_API_KEY),
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-        print("✅ Gemini AI chatbot enabled")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception as e:
-        print(f"⚠️  Gemini init failed: {e} — falling back to offline chat")
-        _gemini_model = None
+        print(f"Gemini error: {e}")
+        return None
+
+if GEMINI_API_KEY:
+    print("✅ Gemini REST chatbot enabled (no extra packages needed)")
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret-change-in-prod")
 JWT_ALGORITHM = "HS256"
@@ -606,13 +628,8 @@ def chat(data: dict):
     if not message:
         return {"reply": "I'm here — what's on your mind?"}
 
-    # Use Gemini if available, otherwise fall back to keyword responses
-    if _gemini_model:
-        try:
-            response = _gemini_model.generate_content(message)
-            reply = response.text.strip()
-            return {"reply": reply}
-        except Exception as e:
-            print(f"Gemini error: {e} — falling back to offline chat")
-
+    # Try Gemini first, fall back to keyword responses
+    reply = gemini_chat(message)
+    if reply:
+        return {"reply": reply}
     return {"reply": offline_chat(message)}
