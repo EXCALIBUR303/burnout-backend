@@ -671,11 +671,28 @@ def chat_debug():
     """Dev-only: test Gemini connectivity and report status."""
     if not GEMINI_API_KEY:
         return {"status": "no_key", "gemini_enabled": False}
+
+    # List available models first
+    available_models = []
+    list_error = ""
+    try:
+        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+        req = urllib.request.Request(list_url)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            mdata = json.loads(r.read())
+        available_models = [m["name"] for m in mdata.get("models", [])]
+    except urllib.error.HTTPError as e:
+        list_error = f"ListModels HTTP {e.code}: {e.read().decode()[:200]}"
+    except Exception as e:
+        list_error = str(e)
+
     reply = gemini_chat("Say hello in one sentence.")
     return {
         "gemini_enabled": True,
         "key_length": len(GEMINI_API_KEY),
         "key_prefix": GEMINI_API_KEY[:8] + "...",
+        "available_models": available_models,
+        "list_error": list_error,
         "test_reply": reply,
         "success": bool(reply),
         "last_error": _last_gemini_error,
