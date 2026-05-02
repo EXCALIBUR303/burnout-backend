@@ -27,12 +27,14 @@ GEMINI_SYSTEM = (
     "Speak like a supportive senior student who knows a lot about wellbeing."
 )
 
+_last_gemini_error = ""
+
 def gemini_chat(message: str) -> str | None:
     """Call Gemini REST API. Returns reply text or None on failure."""
+    global _last_gemini_error
     if not GEMINI_API_KEY:
         return None
     try:
-        # Prepend system prompt as first turn for broadest API compatibility
         full_prompt = f"{GEMINI_SYSTEM}\n\nUser: {message}\nAssistant:"
         payload = json.dumps({
             "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
@@ -46,12 +48,15 @@ def gemini_chat(message: str) -> str | None:
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
+        _last_gemini_error = ""
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except urllib.error.HTTPError as e:
         body = e.read().decode()
+        _last_gemini_error = f"HTTP {e.code}: {body[:300]}"
         print(f"Gemini HTTP {e.code}: {body}")
         return None
     except Exception as e:
+        _last_gemini_error = f"{type(e).__name__}: {e}"
         print(f"Gemini error: {type(e).__name__}: {e}")
         return None
 
@@ -656,4 +661,5 @@ def chat_debug():
         "key_prefix": GEMINI_API_KEY[:8] + "...",
         "test_reply": reply,
         "success": bool(reply),
+        "last_error": _last_gemini_error,
     }
