@@ -54,7 +54,7 @@ def gemini_chat(message: str) -> str | None:
     full_prompt = f"{GEMINI_SYSTEM}\n\nUser: {message}\nAssistant:"
     payload = json.dumps({
         "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
-        "generationConfig": {"maxOutputTokens": 400, "temperature": 0.7},
+        "generationConfig": {"maxOutputTokens": 512, "temperature": 0.75},
     }).encode()
 
     # Use cached model if already found
