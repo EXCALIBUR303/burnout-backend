@@ -304,7 +304,11 @@ def _find_col(df, keywords):
 
 @app.get("/")
 def home():
-    return {"message": "Burnout AI API running"}
+    return {
+        "message": "Burnout AI API running",
+        "version": "2.1.0-gemini-rest",
+        "gemini_enabled": bool(GEMINI_API_KEY),
+    }
 
 
 @app.post("/register")
