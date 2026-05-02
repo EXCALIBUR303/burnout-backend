@@ -13,10 +13,14 @@ import json
 import urllib.request
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-1.5-flash:generateContent?key={key}"
-)
+# Try models in priority order — first one that works is used
+GEMINI_MODELS = [
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash",
+    "gemini-2.0-flash",
+    "gemini-pro",
+]
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 GEMINI_SYSTEM = (
     "You are a compassionate AI wellness assistant for Burnout/AI, a student mental-health app at Woxsen University. "
     "Your role: provide empathetic, evidence-based advice about stress, burnout, sleep, study habits, anxiety, and academic pressure. "
@@ -28,37 +32,50 @@ GEMINI_SYSTEM = (
 )
 
 _last_gemini_error = ""
+_working_model = None  # cached once we find a working model
+
+def _try_model(model: str, payload_bytes: bytes) -> str | None:
+    url = GEMINI_BASE.format(model=model, key=GEMINI_API_KEY)
+    req = urllib.request.Request(
+        url, data=payload_bytes,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json.loads(resp.read())
+    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 def gemini_chat(message: str) -> str | None:
-    """Call Gemini REST API. Returns reply text or None on failure."""
-    global _last_gemini_error
+    """Call Gemini REST API. Tries models in order, caches the first that works."""
+    global _last_gemini_error, _working_model
     if not GEMINI_API_KEY:
         return None
-    try:
-        full_prompt = f"{GEMINI_SYSTEM}\n\nUser: {message}\nAssistant:"
-        payload = json.dumps({
-            "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
-            "generationConfig": {"maxOutputTokens": 200, "temperature": 0.7},
-        }).encode()
-        url = GEMINI_URL.format(key=GEMINI_API_KEY)
-        req = urllib.request.Request(
-            url, data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        _last_gemini_error = ""
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except urllib.error.HTTPError as e:
-        body = e.read().decode()
-        _last_gemini_error = f"HTTP {e.code}: {body[:300]}"
-        print(f"Gemini HTTP {e.code}: {body}")
-        return None
-    except Exception as e:
-        _last_gemini_error = f"{type(e).__name__}: {e}"
-        print(f"Gemini error: {type(e).__name__}: {e}")
-        return None
+
+    full_prompt = f"{GEMINI_SYSTEM}\n\nUser: {message}\nAssistant:"
+    payload = json.dumps({
+        "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
+        "generationConfig": {"maxOutputTokens": 200, "temperature": 0.7},
+    }).encode()
+
+    # Use cached model if already found
+    models_to_try = [_working_model] if _working_model else GEMINI_MODELS
+
+    for model in models_to_try:
+        try:
+            reply = _try_model(model, payload)
+            _working_model = model
+            _last_gemini_error = f"OK via {model}"
+            print(f"✅ Gemini reply via {model}")
+            return reply
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            _last_gemini_error = f"{model} HTTP {e.code}: {body[:200]}"
+            print(f"⚠️ {model} failed: HTTP {e.code}")
+        except Exception as e:
+            _last_gemini_error = f"{model} {type(e).__name__}: {e}"
+            print(f"⚠️ {model} failed: {e}")
+
+    return None
 
 if GEMINI_API_KEY:
     print(f"✅ Gemini REST chatbot enabled (key length: {len(GEMINI_API_KEY)})")
