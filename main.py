@@ -13,12 +13,12 @@ import json
 import urllib.request
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-# Try models in priority order — first one that works is used
+# Models in priority order — uses the latest available (2.5 Flash is best free-tier)
 GEMINI_MODELS = [
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash",
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
-    "gemini-pro",
+    "gemini-flash-latest",
+    "gemini-pro-latest",
 ]
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 GEMINI_SYSTEM = (
