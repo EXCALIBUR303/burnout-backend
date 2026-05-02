@@ -32,26 +32,31 @@ def gemini_chat(message: str) -> str | None:
     if not GEMINI_API_KEY:
         return None
     try:
+        # Prepend system prompt as first turn for broadest API compatibility
+        full_prompt = f"{GEMINI_SYSTEM}\n\nUser: {message}\nAssistant:"
         payload = json.dumps({
-            "system_instruction": {"parts": [{"text": GEMINI_SYSTEM}]},
-            "contents": [{"parts": [{"text": message}]}],
+            "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
             "generationConfig": {"maxOutputTokens": 200, "temperature": 0.7},
         }).encode()
+        url = GEMINI_URL.format(key=GEMINI_API_KEY)
         req = urllib.request.Request(
-            GEMINI_URL.format(key=GEMINI_API_KEY),
-            data=payload,
+            url, data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        print(f"Gemini HTTP {e.code}: {body}")
+        return None
     except Exception as e:
-        print(f"Gemini error: {e}")
+        print(f"Gemini error: {type(e).__name__}: {e}")
         return None
 
 if GEMINI_API_KEY:
-    print("✅ Gemini REST chatbot enabled (no extra packages needed)")
+    print(f"✅ Gemini REST chatbot enabled (key length: {len(GEMINI_API_KEY)})")
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret-change-in-prod")
 JWT_ALGORITHM = "HS256"
@@ -637,3 +642,18 @@ def chat(data: dict):
     if reply:
         return {"reply": reply}
     return {"reply": offline_chat(message)}
+
+
+@app.get("/chat/debug")
+def chat_debug():
+    """Dev-only: test Gemini connectivity and report status."""
+    if not GEMINI_API_KEY:
+        return {"status": "no_key", "gemini_enabled": False}
+    reply = gemini_chat("Say hello in one sentence.")
+    return {
+        "gemini_enabled": True,
+        "key_length": len(GEMINI_API_KEY),
+        "key_prefix": GEMINI_API_KEY[:8] + "...",
+        "test_reply": reply,
+        "success": bool(reply),
+    }
