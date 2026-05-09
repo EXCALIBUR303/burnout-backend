@@ -1,0 +1,44 @@
+# Exclude training/dev files from Docker build context
+# ─────────────────────────────────────────────────────
+# These are only needed locally — Railway runs inference, not training.
+
+# Large training data CSVs
+*.csv
+
+# Old/unused model files (v4 is 29 MB and not in the loading chain)
+stress_model.pkl
+stress_model_v4.pkl
+
+# Training scripts (not needed at runtime)
+trainer*.py
+retrain.py
+synthetic_burnout.py
+datasets.py
+diagnostics.py
+
+# Test suite
+tests/
+
+# Jupyter artifacts
+*.ipynb
+.ipynb_checkpoints/
+
+# Dev-only configs
+nixpacks.toml
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Database (Railway creates its own on first run)
+burnout.db
+
+# Logs
+*.log
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.env
