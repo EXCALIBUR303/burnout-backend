@@ -11,5 +11,6 @@ lightgbm==4.6.0
 pydantic==2.12.5
 bcrypt==4.2.1
 PyJWT==2.10.1
-optuna>=3.4
+# optuna is TRAINING-ONLY — not needed for inference. Install locally when retraining:
+#   pip install "optuna>=3.4"
 # shap is optional — imported lazily in explain.py; install manually if needed: pip install shap
