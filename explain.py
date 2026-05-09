@@ -1,7 +1,9 @@
 """
-Per-prediction SHAP explanations for v3 model.
+Per-prediction SHAP explanations for v3/v4 model.
 Cached TreeExplainer — first call ~2s, subsequent calls <10ms.
+v4 wraps a StackingClassifier, so we drill down to the inner XGBoost.
 """
+import os
 import numpy as np
 import pandas as pd
 from functools import lru_cache
@@ -9,13 +11,34 @@ from functools import lru_cache
 from trainer import ALL_FEATURES, add_features, clip_features, CLIP
 
 
+def _find_xgb(estimator):
+    """Drill into a calibrated/stacked estimator until we find an XGBoost tree."""
+    # Bare XGBoost (or any tree with feature_importances_ + DMatrix-compatible API)
+    if hasattr(estimator, "get_booster"):
+        return estimator
+    # StackingClassifier — find the first XGB base learner
+    if hasattr(estimator, "estimators_"):
+        for base in estimator.estimators_:
+            xgb = _find_xgb(base)
+            if xgb is not None:
+                return xgb
+    return None
+
+
 @lru_cache(maxsize=1)
 def _load_explainer():
     import shap, joblib
-    model = joblib.load("stress_model_v3.pkl")
-    # Access base XGBoost from first calibration fold
-    base_xgb = model.calibrated_classifiers_[0].estimator
-    explainer = shap.TreeExplainer(base_xgb)
+    # Prefer v4, fall back to v3
+    pkl = "stress_model_v4.pkl" if os.path.exists("stress_model_v4.pkl") else "stress_model_v3.pkl"
+    model = joblib.load(pkl)
+
+    # Drill into CalibratedClassifierCV → first fold → its inner estimator
+    inner = model.calibrated_classifiers_[0].estimator if hasattr(model, "calibrated_classifiers_") else model
+    xgb = _find_xgb(inner)
+    if xgb is None:
+        raise RuntimeError(f"Could not locate an XGBoost tree inside {pkl} for SHAP")
+
+    explainer = shap.TreeExplainer(xgb)
     return model, explainer
 
 

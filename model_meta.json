@@ -1,0 +1,64 @@
+{
+  "version": "2.0",
+  "features": [
+    "study_hours_per_day",
+    "sleep_hours_per_day",
+    "social_hours_per_day",
+    "physical_activity_hours_per_day",
+    "gpa_norm",
+    "screen_time_hours",
+    "extracurricular_hours",
+    "study_sleep_ratio",
+    "sleep_deficit",
+    "burnout_index",
+    "active_hours",
+    "rest_ratio",
+    "productive_vs_leisure",
+    "hourly_load"
+  ],
+  "base_features": [
+    "study_hours_per_day",
+    "sleep_hours_per_day",
+    "social_hours_per_day",
+    "physical_activity_hours_per_day",
+    "gpa_norm",
+    "screen_time_hours",
+    "extracurricular_hours"
+  ],
+  "clip_bounds": {
+    "study_hours_per_day": [
+      0,
+      18
+    ],
+    "sleep_hours_per_day": [
+      2,
+      14
+    ],
+    "social_hours_per_day": [
+      0,
+      12
+    ],
+    "physical_activity_hours_per_day": [
+      0,
+      8
+    ],
+    "gpa_norm": [
+      0,
+      1
+    ],
+    "screen_time_hours": [
+      0,
+      16
+    ],
+    "extracurricular_hours": [
+      0,
+      8
+    ]
+  },
+  "label_map": {
+    "0": "Low",
+    "1": "Medium",
+    "2": "High"
+  },
+  "n_samples": 2000
+}

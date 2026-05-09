@@ -1,0 +1,82 @@
+{
+  "version": "5.0",
+  "features": [
+    "study_hours_per_day",
+    "sleep_hours_per_day",
+    "social_hours_per_day",
+    "physical_activity_hours_per_day",
+    "gpa_norm",
+    "screen_time_hours",
+    "extracurricular_hours",
+    "anxiety_norm",
+    "social_support_deficit",
+    "career_concern_norm",
+    "mood_norm",
+    "study_sleep_ratio",
+    "sleep_deficit",
+    "burnout_index",
+    "active_hours",
+    "rest_ratio",
+    "productive_vs_leisure",
+    "hourly_load"
+  ],
+  "base_objective": [
+    "study_hours_per_day",
+    "sleep_hours_per_day",
+    "social_hours_per_day",
+    "physical_activity_hours_per_day",
+    "gpa_norm",
+    "screen_time_hours",
+    "extracurricular_hours"
+  ],
+  "subjective": [
+    "anxiety_norm",
+    "social_support_deficit",
+    "career_concern_norm",
+    "mood_norm"
+  ],
+  "engineered": [
+    "study_sleep_ratio",
+    "sleep_deficit",
+    "burnout_index",
+    "active_hours",
+    "rest_ratio",
+    "productive_vs_leisure",
+    "hourly_load"
+  ],
+  "primary_holdout_accuracy": 0.7672,
+  "primary_holdout_macro_f1": 0.7932,
+  "primary_holdout_weighted_f1": 0.768,
+  "primary_holdout_logloss": 0.4737,
+  "lifestyle_benchmark_accuracy": 0.337,
+  "lifestyle_benchmark_macro_f1": 0.168,
+  "n_train": 41554,
+  "n_test": 10389,
+  "best_xgb_params": {
+    "n_estimators": 400,
+    "max_depth": 6,
+    "learning_rate": 0.01464669875006067,
+    "subsample": 0.9208787923016158,
+    "colsample_bytree": 0.6298202574719083,
+    "min_child_weight": 10,
+    "reg_alpha": 0.7722447692966574,
+    "reg_lambda": 0.996789203835431
+  },
+  "best_xgb_cv_f1_macro": 0.7993,
+  "ensemble": "Stacking[XGB+LGBM] + LogReg meta (no calibration)",
+  "optuna_trials": 40,
+  "train_sources": [
+    "lifestyle_100k",
+    "stress_level",
+    "stress_survey",
+    "synthetic"
+  ],
+  "dropped_sources": [
+    "depression",
+    "mental_health2",
+    "sleep_health",
+    "sleep_patterns",
+    "social_media"
+  ],
+  "holdout_strategy": "20% random stratified from sources with full subjective features"
+}

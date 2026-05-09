@@ -3,9 +3,13 @@ uvicorn==0.39.0
 joblib==1.5.3
 pandas==2.3.3
 numpy==2.0.2
-xgboost==2.1.4
+# Pinned to match versions used to TRAIN stress_model_v5.pkl — version
+# mismatches (esp. xgboost 2.x vs 3.x) break joblib unpickling.
+xgboost==3.2.0
+scikit-learn==1.8.0
+lightgbm==4.6.0
 pydantic==2.12.5
-scikit-learn
 bcrypt==4.2.1
 PyJWT==2.10.1
-shap>=0.45.0
+optuna>=3.4
+# shap is optional — imported lazily in explain.py; install manually if needed: pip install shap

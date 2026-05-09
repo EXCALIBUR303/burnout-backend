@@ -1,0 +1,32 @@
+{
+  "version": "3.0",
+  "features": [
+    "study_hours_per_day",
+    "sleep_hours_per_day",
+    "social_hours_per_day",
+    "physical_activity_hours_per_day",
+    "gpa_norm",
+    "screen_time_hours",
+    "extracurricular_hours",
+    "study_sleep_ratio",
+    "sleep_deficit",
+    "burnout_index",
+    "active_hours",
+    "rest_ratio",
+    "productive_vs_leisure",
+    "hourly_load"
+  ],
+  "honesty_holdout_accuracy": 0.5435,
+  "honesty_holdout_logloss": 1.8442,
+  "n_train": 31580,
+  "n_test": 2000,
+  "sources_trained": [
+    "depression",
+    "mental_health2",
+    "sleep_health",
+    "sleep_patterns",
+    "social_media",
+    "stress_level"
+  ],
+  "calibration": "isotonic, cv=5"
+}

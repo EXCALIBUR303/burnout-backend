@@ -1,0 +1,14 @@
+{
+  "rule_recovered_accuracy": 1.0,
+  "leakage_score": 1.0,
+  "verdict": "LEAKAGE \u2014 labels are rule-based",
+  "mutual_info_per_feature": {
+    "Study_Hours_Per_Day": 0.657,
+    "Sleep_Hours_Per_Day": 0.159,
+    "Social_Hours_Per_Day": 0.0064,
+    "Physical_Activity_Hours_Per_Day": 0.0419,
+    "study_sleep_ratio": 0.5119,
+    "sleep_deficit": 0.1626
+  },
+  "recovered_rules": "|--- Study_Hours_Per_Day <= 8.05\n|   |--- Sleep_Hours_Per_Day <= 5.95\n|   |   |--- class: 2\n|   |--- Sleep_Hours_Per_Day >  5.95\n|   |   |--- Study_Hours_Per_Day <= 5.95\n|   |   |   |--- class: 0\n|   |   |--- Study_Hours_Per_Day >  5.95\n|   |   |   |--- class: 1\n|--- Study_Hours_Per_Day >  8.05\n|   |--- class: 2\n"
+}

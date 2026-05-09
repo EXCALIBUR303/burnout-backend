@@ -1,0 +1,10 @@
+# Railway / Nixpacks build config
+#
+# LightGBM (used by stress_model_v5.pkl + v4.pkl stacking ensemble) needs the
+# GNU OpenMP runtime libgomp.so.1 at import time. Railway's default Python
+# image does NOT include it, which caused v4 + v5 to silently fail to
+# unpickle and main.py to fall back through to v3 (objective-only model).
+#
+# libgomp1 = Debian package providing libgomp.so.1
+[phases.setup]
+aptPkgs = ["libgomp1"]

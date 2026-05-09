@@ -7,6 +7,7 @@ import bcrypt
 import jwt
 import os
 from datetime import datetime, timedelta, timezone
+from feedback import init_schema as _init_feedback, record_feedback, get_stats as _feedback_stats
 
 # ── Gemini AI via REST API (no extra packages — uses stdlib urllib) ────────────
 import json
@@ -81,10 +82,47 @@ def gemini_chat(message: str) -> str | None:
 
     return None
 
+
+def gemini_chat_with_context(full_prompt: str) -> str | None:
+    """Call Gemini REST API with a pre-built prompt (supports history + user context)."""
+    global _last_gemini_error, _working_model
+    if not GEMINI_API_KEY:
+        return None
+
+    payload = json.dumps({
+        "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
+        "generationConfig": {
+            "maxOutputTokens": 512,
+            "temperature": 0.75,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }).encode()
+
+    models_to_try = [_working_model] if _working_model else GEMINI_MODELS
+
+    for model in models_to_try:
+        try:
+            reply = _try_model(model, payload)
+            _working_model = model
+            _last_gemini_error = f"OK via {model}"
+            print(f"✅ Gemini reply via {model}")
+            return reply
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            _last_gemini_error = f"{model} HTTP {e.code}: {body[:200]}"
+            print(f"⚠️ {model} failed: HTTP {e.code}")
+        except Exception as e:
+            _last_gemini_error = f"{model} {type(e).__name__}: {e}"
+            print(f"⚠️ {model} failed: {e}")
+
+    return None
+
 if GEMINI_API_KEY:
     print(f"✅ Gemini REST chatbot enabled (key length: {len(GEMINI_API_KEY)})")
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "dev-secret-change-in-prod")
+if JWT_SECRET == "dev-secret-change-in-prod":
+    print("⚠️  [security] JWT_SECRET is using the default dev value — set JWT_SECRET env var in Railway!")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_DAYS = 7
 
@@ -99,28 +137,95 @@ app.add_middleware(
 )
 
 # ===== MODEL =====
-model = joblib.load("stress_model.pkl")
+import numpy as np  # needed for feature importance averaging across calibration folds
+_V5_PKL = "stress_model_v5.pkl"
+_V4_PKL = "stress_model_v4.pkl"
+_V3_PKL = "stress_model_v3.pkl"
+_V2_PKL = "stress_model.pkl"
+
+import traceback as _traceback
+model = None
+_active_pkl = "none"
+_load_errors = {}  # {pkl_name: full_traceback} — exposed via /debug/model
+# Load priority: v5 → v3 (skip v4 — 29 MB pkl causes cold-start OOM/timeout)
+# v4 used calibration wrapper which broke predictions anyway; v3 is the reliable baseline.
+for _pkl in [_V5_PKL, _V3_PKL, _V2_PKL]:
+    if os.path.exists(_pkl):
+        try:
+            model = joblib.load(_pkl)
+            _active_pkl = _pkl
+            print(f"[model] loaded {_pkl} OK")
+            break
+        except Exception as _e:
+            _tb = _traceback.format_exc()
+            _load_errors[_pkl] = _tb[-2000:]  # last 2000 chars — enough for the root cause
+            print(f"[model] failed to load {_pkl}: {type(_e).__name__}: {_e}")
+            print(_tb)
+    else:
+        _load_errors[_pkl] = "FILE_NOT_PRESENT"
+
+if model is None:
+    print("[model] ⚠️  No model loaded — /predict will return error. Check pkl files.")
+
+# Detect which feature schema this model expects (v5 has 18 features, v4/v3/v2 have 14)
+_IS_V5 = _active_pkl == _V5_PKL
+
 labels = {0: "Low", 1: "Medium", 2: "High"}
 
-FEATURE_NAMES = [
-    "study_hours_per_day", "sleep_hours_per_day", "social_hours_per_day",
-    "physical_activity_hours_per_day", "study_sleep_ratio",
-    "active_hours", "rest_ratio", "productive_vs_leisure",
-]
+# v5: 7 objective + 4 subjective + 7 engineered = 18 features
+# v2-v4: 7 objective + 7 engineered = 14 features
+if _IS_V5:
+    FEATURE_NAMES = [
+        # ── Objective lifestyle ──
+        "study_hours_per_day", "sleep_hours_per_day", "social_hours_per_day",
+        "physical_activity_hours_per_day", "gpa_norm",
+        "screen_time_hours", "extracurricular_hours",
+        # ── Subjective psychological (NEW v5) ──
+        "anxiety_norm", "social_support_deficit",
+        "career_concern_norm", "mood_norm",
+        # ── Engineered ──
+        "study_sleep_ratio", "sleep_deficit", "burnout_index",
+        "active_hours", "rest_ratio",
+        "productive_vs_leisure", "hourly_load",
+    ]
+else:
+    FEATURE_NAMES = [
+        "study_hours_per_day", "sleep_hours_per_day", "social_hours_per_day",
+        "physical_activity_hours_per_day",
+        "gpa_norm", "screen_time_hours", "extracurricular_hours",
+        "study_sleep_ratio", "sleep_deficit", "burnout_index",
+        "active_hours", "rest_ratio", "productive_vs_leisure", "hourly_load",
+    ]
 
 FEATURE_META = {
     "study_hours_per_day":             {"label": "Study load",         "emoji": "📚", "avg": 6.5,  "high_is_risk": True},
     "sleep_hours_per_day":             {"label": "Sleep hours",        "emoji": "😴", "avg": 7.5,  "high_is_risk": False},
     "social_hours_per_day":            {"label": "Social time",        "emoji": "👥", "avg": 2.0,  "high_is_risk": False},
     "physical_activity_hours_per_day": {"label": "Physical activity",  "emoji": "🏃", "avg": 1.2,  "high_is_risk": False},
+    "gpa_norm":                        {"label": "GPA",                "emoji": "🎓", "avg": 0.7,  "high_is_risk": False},
+    "screen_time_hours":               {"label": "Screen time",        "emoji": "📱", "avg": 2.0,  "high_is_risk": True},
+    "extracurricular_hours":           {"label": "Extracurricular",    "emoji": "🎭", "avg": 1.5,  "high_is_risk": False},
+    # ── Subjective (v5) ──
+    "anxiety_norm":                    {"label": "Anxiety level",      "emoji": "😰", "avg": 0.4,  "high_is_risk": True},
+    "social_support_deficit":          {"label": "Support deficit",    "emoji": "🤝", "avg": 0.4,  "high_is_risk": True},
+    "career_concern_norm":             {"label": "Career worry",       "emoji": "💼", "avg": 0.4,  "high_is_risk": True},
+    "mood_norm":                       {"label": "Self-rated stress",  "emoji": "💭", "avg": 0.4,  "high_is_risk": True},
+    # ── Engineered ──
     "study_sleep_ratio":               {"label": "Study/sleep ratio",  "emoji": "⚖️", "avg": 0.9,  "high_is_risk": True},
+    "sleep_deficit":                   {"label": "Sleep deficit",      "emoji": "🌙", "avg": 0.5,  "high_is_risk": True},
+    "burnout_index":                   {"label": "Burnout index",      "emoji": "🔥", "avg": 0.5,  "high_is_risk": True},
     "active_hours":                    {"label": "Active hours",       "emoji": "⚡", "avg": 7.7,  "high_is_risk": False},
-    "rest_ratio":                      {"label": "Rest ratio",         "emoji": "🌙", "avg": 0.7,  "high_is_risk": False},
+    "rest_ratio":                      {"label": "Rest ratio",         "emoji": "💤", "avg": 0.7,  "high_is_risk": False},
     "productive_vs_leisure":           {"label": "Productivity ratio", "emoji": "🎯", "avg": 2.0,  "high_is_risk": True},
+    "hourly_load":                     {"label": "Hourly load",        "emoji": "⏰", "avg": 0.6,  "high_is_risk": True},
 }
 
 # ===== DATABASE =====
-conn = sqlite3.connect("burnout.db", check_same_thread=False)
+# DB_PATH lets Railway users point to a persistent volume (e.g. /data/burnout.db)
+# Set DB_PATH env var in Railway → Settings → Variables, then add a Volume at /data
+_DB_PATH = os.environ.get("DB_PATH", "burnout.db")
+conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+print(f"[db] using {_DB_PATH}")
 cursor = conn.cursor()
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS predictions (
@@ -147,13 +252,23 @@ cursor.execute("""
 conn.commit()
 print("[OK] Users table ready")
 
-# Migrate predictions table: add user_id column if missing
-try:
-    cursor.execute("ALTER TABLE predictions ADD COLUMN user_id INTEGER REFERENCES users(id)")
-    conn.commit()
-    print("[OK] Added user_id column to predictions")
-except Exception:
-    pass  # Column already exists
+# Migrate predictions table: add missing columns if they don't exist yet
+for _col, _type in [
+    ("user_id",     "INTEGER REFERENCES users(id)"),
+    ("screen_time", "REAL"),
+    ("gpa_norm",    "REAL"),
+    ("extra",       "REAL"),
+    ("confidence",  "REAL"),
+]:
+    try:
+        cursor.execute(f"ALTER TABLE predictions ADD COLUMN {_col} {_type}")
+        conn.commit()
+        print(f"[OK] Added column: {_col}")
+    except Exception:
+        pass  # column already exists
+
+_init_feedback(conn)
+print("[OK] Feedback table ready")
 
 
 # ===== CHATBOT =====
@@ -211,10 +326,49 @@ def offline_chat(message: str) -> str:
 
 _feature_importance_cache: list | None = None
 
+def _get_feature_importances(m) -> list:
+    """Extract feature importances from XGBoost / CalibratedClassifierCV / StackingClassifier."""
+    # Plain XGBoost / LightGBM / RandomForest
+    if hasattr(m, "feature_importances_"):
+        return list(m.feature_importances_)
+
+    # CalibratedClassifierCV — average across folds
+    if hasattr(m, "calibrated_classifiers_"):
+        all_folds = []
+        for c in m.calibrated_classifiers_:
+            est = getattr(c, "estimator", None)
+            if est is None:
+                continue
+            # If the wrapped estimator is a StackingClassifier (v4)
+            if hasattr(est, "estimators_"):
+                # Average importances across all base learners that have them
+                base_imps = []
+                for base in est.estimators_:
+                    if hasattr(base, "feature_importances_"):
+                        base_imps.append(np.asarray(base.feature_importances_, dtype=float))
+                if base_imps:
+                    all_folds.append(np.mean(base_imps, axis=0))
+            elif hasattr(est, "feature_importances_"):
+                all_folds.append(np.asarray(est.feature_importances_, dtype=float))
+        if all_folds:
+            return list(np.mean(all_folds, axis=0))
+
+    # Plain StackingClassifier (no calibration wrapper)
+    if hasattr(m, "estimators_"):
+        base_imps = []
+        for base in m.estimators_:
+            if hasattr(base, "feature_importances_"):
+                base_imps.append(np.asarray(base.feature_importances_, dtype=float))
+        if base_imps:
+            return list(np.mean(base_imps, axis=0))
+
+    return [1.0 / len(FEATURE_NAMES)] * len(FEATURE_NAMES)
+
+
 def get_cached_feature_importance() -> list:
     global _feature_importance_cache
     if _feature_importance_cache is None:
-        importances = model.feature_importances_
+        importances = _get_feature_importances(model)
         total_imp   = sum(importances) or 1.0
         _feature_importance_cache = sorted(
             [
@@ -338,6 +492,43 @@ def home():
     return {
         "message": "Burnout AI API running",
         "gemini_enabled": bool(GEMINI_API_KEY),
+        "model": _active_pkl,
+    }
+
+
+@app.get("/ping")
+def ping():
+    """Keep-alive endpoint — frontend pings this every 14 min to prevent Railway cold starts."""
+    return {"ok": True}
+
+
+@app.get("/debug/model")
+def debug_model():
+    """Diagnostic — shows which model loaded and why others failed."""
+    import sys
+    try:
+        import sklearn, xgboost, lightgbm
+        versions = {
+            "python":   sys.version.split()[0],
+            "sklearn":  sklearn.__version__,
+            "xgboost":  xgboost.__version__,
+            "lightgbm": lightgbm.__version__,
+        }
+    except Exception as e:
+        versions = {"error": str(e)}
+
+    file_listing = {}
+    for pkl in ["stress_model_v5.pkl", "stress_model_v4.pkl", "stress_model_v3.pkl", "stress_model.pkl"]:
+        if os.path.exists(pkl):
+            file_listing[pkl] = {"present": True, "size_mb": round(os.path.getsize(pkl) / 1e6, 2)}
+        else:
+            file_listing[pkl] = {"present": False}
+
+    return {
+        "active_model":  _active_pkl,
+        "load_errors":   _load_errors,
+        "files_on_disk": file_listing,
+        "versions":      versions,
     }
 
 
@@ -508,30 +699,31 @@ def get_dataset_stats():
 
 @app.get("/history")
 def get_prediction_history(request: Request):
-    """Returns predictions: personal if token present, all rows otherwise."""
+    """Returns the logged-in user's predictions only. Guests get an empty list."""
     try:
         user = get_user_from_request(request)
-        if user:
-            cursor.execute(
-                "SELECT id, study, sleep, social, physical, result, created_at "
-                "FROM predictions WHERE user_id = ? ORDER BY created_at DESC LIMIT 200",
-                (user["sub"],),
-            )
-        else:
-            cursor.execute(
-                "SELECT id, study, sleep, social, physical, result, created_at "
-                "FROM predictions ORDER BY created_at DESC LIMIT 200"
-            )
+        if not user:
+            return []   # privacy: guests cannot see others' data
+        cursor.execute(
+            "SELECT id, study, sleep, social, physical, result, created_at, "
+            "screen_time, gpa_norm, extra, confidence "
+            "FROM predictions WHERE user_id = ? ORDER BY created_at DESC LIMIT 200",
+            (user["sub"],),
+        )
         rows = cursor.fetchall()
         return [
             {
-                "id":         r[0],
-                "study":      r[1],
-                "sleep":      r[2],
-                "social":     r[3],
-                "physical":   r[4],
-                "result":     r[5],
-                "created_at": r[6],
+                "id":          r[0],
+                "study":       r[1],
+                "sleep":       r[2],
+                "social":      r[3],
+                "physical":    r[4],
+                "result":      r[5],
+                "created_at":  r[6],
+                "screen_time": r[7],
+                "gpa_norm":    r[8],
+                "extra":       r[9],
+                "confidence":  r[10],
             }
             for r in rows
         ]
@@ -539,28 +731,116 @@ def get_prediction_history(request: Request):
         return {"error": str(e)}
 
 
+@app.get("/cohort")
+def cohort_stats(request: Request):
+    """Anonymous aggregate stats for cohort comparison on the Progress page."""
+    try:
+        # Overall counts by risk level
+        cur2 = conn.execute("SELECT result, COUNT(*) FROM predictions GROUP BY result")
+        counts = {r[0]: r[1] for r in cur2.fetchall()}
+        total  = sum(counts.values()) or 1
+
+        # User's latest risk for percentile
+        user = get_user_from_request(request)
+        user_rank_pct = None
+        if user:
+            cur3 = conn.execute(
+                "SELECT result FROM predictions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
+                (user["sub"],),
+            )
+            row = cur3.fetchone()
+            if row:
+                user_result = row[0]
+                # % of users with WORSE (higher) risk than the current user
+                risk_order = {"Low": 0, "Medium": 1, "High": 2}
+                user_risk  = risk_order.get(user_result, 1)
+                worse = sum(v for k, v in counts.items() if risk_order.get(k, 1) > user_risk)
+                user_rank_pct = round(worse / total * 100, 1)
+
+        return {
+            "total":       int(total),
+            "low_count":   int(counts.get("Low",    0)),
+            "medium_count":int(counts.get("Medium", 0)),
+            "high_count":  int(counts.get("High",   0)),
+            "low_pct":     round(counts.get("Low",    0) / total * 100, 1),
+            "medium_pct":  round(counts.get("Medium", 0) / total * 100, 1),
+            "high_pct":    round(counts.get("High",   0) / total * 100, 1),
+            "user_rank_pct": user_rank_pct,  # % of users with worse risk than you
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.post("/predict")
 def predict(data: dict, request: Request):
+    if model is None:
+        return {"error": "Model not loaded — check server logs for pkl load errors"}
     try:
+        # ── Base features (7) ─────────────────────────────────────────
         study    = float(data.get("study_hours_per_day", 0))
         sleep    = float(data.get("sleep_hours_per_day", 0))
         social   = float(data.get("social_hours_per_day", 0))
         physical = float(data.get("physical_activity_hours_per_day", 0))
+        gpa_norm = float(data.get("gpa_norm", 0.70))          # normalised 0-1
+        screen   = float(data.get("screen_time_hours", 2.0))  # daily screen hours
+        extra    = float(data.get("extracurricular_hours", 1.0))
 
-        total = study + sleep + social + physical or 1.0
+        # ── Subjective features (4) — defaults to mid-scale when not provided ──
+        # These come from the new psychological questions in v5; if older
+        # frontends don't send them, we fall back to the population average.
+        anxiety_norm           = float(data.get("anxiety_norm",          0.4))
+        social_support_deficit = float(data.get("social_support_deficit", 0.4))
+        career_concern_norm    = float(data.get("career_concern_norm",   0.4))
+        mood_norm              = float(data.get("mood_norm",             0.4))
+
+        # ── Clip to training bounds (mirrors trainer.py CLIP) ─────────
+        study    = min(max(study,    0), 18)
+        sleep    = min(max(sleep,    2), 14)
+        social   = min(max(social,   0), 12)
+        physical = min(max(physical, 0),  8)
+        gpa_norm = min(max(gpa_norm, 0),  1)
+        screen   = min(max(screen,   0), 16)
+        extra    = min(max(extra,    0),  8)
+        # Subjective features all live on [0, 1]
+        anxiety_norm           = min(max(anxiety_norm,           0), 1)
+        social_support_deficit = min(max(social_support_deficit, 0), 1)
+        career_concern_norm    = min(max(career_concern_norm,    0), 1)
+        mood_norm              = min(max(mood_norm,              0), 1)
+
+        total = (study + sleep + social + physical) or 1.0
+
+        # ── Engineered features (7) ───────────────────────────────────
+        study_sleep_ratio     = study / (sleep + 0.1)
+        sleep_deficit         = max(0.0, 7.5 - sleep)
+        burnout_index         = study_sleep_ratio * sleep_deficit
+        active_hours          = study + physical
+        rest_ratio            = (sleep + physical) / total
+        productive_vs_leisure = study / (social + physical + 0.1)
+        hourly_load           = (study + social + physical + screen) / 16.0
 
         feature_vals = {
-            "study_hours_per_day":              study,
-            "sleep_hours_per_day":              sleep,
-            "social_hours_per_day":             social,
-            "physical_activity_hours_per_day":  physical,
-            "study_sleep_ratio":                study / (sleep + 0.1),
-            "active_hours":                     study + physical,
-            "rest_ratio":                       (sleep + physical) / total,
-            "productive_vs_leisure":            study / (social + physical + 0.1),
+            "study_hours_per_day":             study,
+            "sleep_hours_per_day":             sleep,
+            "social_hours_per_day":            social,
+            "physical_activity_hours_per_day": physical,
+            "gpa_norm":                        gpa_norm,
+            "screen_time_hours":               screen,
+            "extracurricular_hours":           extra,
+            "anxiety_norm":                    anxiety_norm,
+            "social_support_deficit":          social_support_deficit,
+            "career_concern_norm":             career_concern_norm,
+            "mood_norm":                       mood_norm,
+            "study_sleep_ratio":               study_sleep_ratio,
+            "sleep_deficit":                   sleep_deficit,
+            "burnout_index":                   burnout_index,
+            "active_hours":                    active_hours,
+            "rest_ratio":                      rest_ratio,
+            "productive_vs_leisure":           productive_vs_leisure,
+            "hourly_load":                     hourly_load,
         }
 
-        df = pd.DataFrame([feature_vals])
+        # Build DataFrame in exact feature order the model was trained on
+        df = pd.DataFrame([feature_vals])[FEATURE_NAMES]
 
         prediction   = model.predict(df)[0]
         result_label = labels.get(int(prediction), "Unknown")
@@ -575,35 +855,81 @@ def predict(data: dict, request: Request):
         }
 
         # ── Top drivers ───────────────────────────────────────────────
-        importances = model.feature_importances_
-        total_imp   = sum(importances) or 1.0
-        ranked      = sorted(
-            zip(FEATURE_NAMES, importances),
-            key=lambda x: x[1], reverse=True
-        )
+        # Use human-readable features only (objective + subjective, never engineered).
+        # Rank by how far each value deviates in the risky direction for THIS user.
+        BASE_FEATURES = [
+            "study_hours_per_day", "sleep_hours_per_day", "social_hours_per_day",
+            "physical_activity_hours_per_day", "gpa_norm", "screen_time_hours",
+            "extracurricular_hours",
+        ]
+        # Include subjective features in driver ranking ONLY if v5 model is loaded
+        # AND the frontend supplied real values (not defaults)
+        if _IS_V5:
+            for sub in ["anxiety_norm", "social_support_deficit", "career_concern_norm", "mood_norm"]:
+                if sub in data:  # only count if frontend explicitly sent it
+                    BASE_FEATURES.append(sub)
+        driver_scores = []
+        for fname in BASE_FEATURES:
+            meta = FEATURE_META[fname]
+            val  = feature_vals[fname]
+            avg  = meta["avg"]
+            # How far is this value from the safe side?
+            if meta["high_is_risk"]:
+                deviation = val - avg          # positive = risky
+            else:
+                deviation = avg - val          # positive = risky (low when should be high)
+            concerning = deviation > 0
+            driver_scores.append((fname, deviation, concerning))
+
+        # Sort by deviation descending — most concerning first
+        driver_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # Subjective features (and gpa_norm) are 0-1 scale — display as 0-10 / percent
+        SCALED_DISPLAY = {"gpa_norm", "anxiety_norm", "social_support_deficit",
+                          "career_concern_norm", "mood_norm"}
+
         top_drivers = []
-        for fname, imp in ranked[:3]:
-            meta       = FEATURE_META[fname]
-            val        = feature_vals[fname]
-            concerning = (val > meta["avg"]) if meta["high_is_risk"] else (val < meta["avg"])
+        for fname, deviation, concerning in driver_scores[:3]:
+            meta = FEATURE_META[fname]
+            val  = feature_vals[fname]
+            if fname in SCALED_DISPLAY:
+                display_val = round(val * 10, 1)
+                display_avg = round(meta["avg"] * 10, 1)
+            else:
+                display_val = round(val, 1)
+                display_avg = meta["avg"]
             top_drivers.append({
-                "feature":        fname,
-                "label":          meta["label"],
-                "emoji":          meta["emoji"],
-                "value":          round(val, 2),
-                "avg":            meta["avg"],
-                "direction":      "risk" if concerning else "ok",
-                "importance_pct": round(float(imp / total_imp * 100), 1),
+                "feature":   fname,
+                "label":     meta["label"],
+                "emoji":     meta["emoji"],
+                "value":     display_val,
+                "avg":       display_avg,
+                "direction": "risk" if concerning else "ok",
             })
 
         # ── Persist ───────────────────────────────────────────────────
         user    = get_user_from_request(request)
         user_id = user["sub"] if user else None
         cursor.execute(
-            "INSERT INTO predictions (study, sleep, social, physical, result, user_id) VALUES (?,?,?,?,?,?)",
-            (study, sleep, social, physical, result_label, user_id),
+            "INSERT INTO predictions (study, sleep, social, physical, result, user_id, screen_time, gpa_norm, extra, confidence) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (study, sleep, social, physical, result_label, user_id, screen, gpa_norm, extra, confidence),
         )
         conn.commit()
+        pred_id = cursor.lastrowid
+
+        # SHAP per-prediction explanation (best-effort — won't crash /predict if unavailable)
+        shap_explanation = None
+        try:
+            from explain import explain_prediction
+            shap_explanation = explain_prediction({
+                "study_hours_per_day": study, "sleep_hours_per_day": sleep,
+                "social_hours_per_day": social, "physical_activity_hours_per_day": physical,
+                "gpa_norm": gpa_norm, "screen_time_hours": screen,
+                "extracurricular_hours": extra,
+            })
+        except Exception as _shap_err:
+            print(f"[shap] skipped: {_shap_err}")
 
         return {
             "prediction":    result_label,
@@ -611,6 +937,9 @@ def predict(data: dict, request: Request):
             "confidence":    confidence,
             "probabilities": probabilities,
             "top_drivers":   top_drivers,
+            "prediction_id": pred_id,
+            "explanation":   shap_explanation,
+            "model_version": _active_pkl.replace("stress_model_", "").replace(".pkl", ""),
         }
 
     except Exception as e:
@@ -659,13 +988,47 @@ def generate_plan(data: dict):
 @app.post("/chat")
 def chat(data: dict):
     message = data.get("message", "").strip()
+    history = data.get("history", [])       # list of {role, text} dicts
+    user_context = data.get("user_context", "")  # e.g. "High Burnout, studies 9h/day"
     if not message:
         return {"reply": "I'm here — what's on your mind?"}
 
-    # Try Gemini first, fall back to keyword responses
-    reply = gemini_chat(message)
+    # Build conversation prompt with context
+    context_prefix = ""
+    if user_context:
+        context_prefix = f"User context: {user_context}\n\n"
+
+    # Build history string (last 6 turns max)
+    history_str = ""
+    for turn in history[-6:]:
+        role = "User" if turn.get("role") == "user" else "Assistant"
+        history_str += f"{role}: {turn.get('text', '')}\n"
+
+    if history_str:
+        full_prompt = f"{GEMINI_SYSTEM}\n\n{context_prefix}Conversation so far:\n{history_str}\nUser: {message}\nAssistant:"
+    else:
+        full_prompt = f"{GEMINI_SYSTEM}\n\n{context_prefix}User: {message}\nAssistant:"
+
+    reply = gemini_chat_with_context(full_prompt)
     if reply:
         return {"reply": reply}
     return {"reply": offline_chat(message)}
 
 
+@app.post("/feedback")
+def submit_feedback(data: dict, request: Request):
+    user = get_user_from_request(request)
+    record_feedback(
+        conn,
+        prediction_id=data.get("prediction_id"),
+        user_id=user["sub"] if user else None,
+        accurate=int(data.get("accurate", 1)),
+        actual_label=data.get("actual_label"),
+        notes=data.get("notes"),
+    )
+    return {"ok": True}
+
+
+@app.get("/feedback/stats")
+def feedback_stats():
+    return _feedback_stats(conn)
