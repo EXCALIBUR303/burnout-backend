@@ -27,6 +27,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 ENV PYTHONUNBUFFERED=1
+# Prevent OMP/OpenMP thread-pool init from hanging in Railway's container environment.
+# XGBoost and LightGBM default to -1 threads (all CPUs), which can deadlock during
+# first-use init inside Docker. Setting 1 thread avoids the hang; prediction is fast
+# enough with 1 thread for single-request inference.
+ENV OMP_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
 
 # Railway provides $PORT at runtime. We MUST use explicit `sh -c` exec form
 # so the variable is expanded by the shell (not passed as literal "$PORT" to
