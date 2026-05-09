@@ -137,18 +137,25 @@ app.add_middleware(
 )
 
 # ===== MODEL =====
-import numpy as np  # needed for feature importance averaging across calibration folds
+import numpy as np
+
 _V5_PKL = "stress_model_v5.pkl"
 _V4_PKL = "stress_model_v4.pkl"
 _V3_PKL = "stress_model_v3.pkl"
 _V2_PKL = "stress_model.pkl"
 
 import traceback as _traceback
+
 model = None
 _active_pkl = "none"
-_load_errors = {}  # {pkl_name: full_traceback} — exposed via /debug/model
-# Load priority: v5 → v3 (skip v4 — 29 MB pkl causes cold-start OOM/timeout)
-# v4 used calibration wrapper which broke predictions anyway; v3 is the reliable baseline.
+_load_errors = {}   # {pkl_name: full_traceback} — exposed via /debug/model
+_model_ready = False  # set True once loading finishes (kept for API compat)
+
+# Load priority: v5 → v3 (skip v4 — 29 MB pkl causes cold-start OOM/timeout).
+# Run synchronously at module level — must complete before uvicorn accepts
+# connections, but xgboost/lightgbm are already imported above so this is
+# just joblib.load (disk I/O + numpy deserialisation, typically 5-15 s).
+print("[model] loading...")
 for _pkl in [_V5_PKL, _V3_PKL, _V2_PKL]:
     if os.path.exists(_pkl):
         try:
@@ -158,44 +165,61 @@ for _pkl in [_V5_PKL, _V3_PKL, _V2_PKL]:
             break
         except Exception as _e:
             _tb = _traceback.format_exc()
-            _load_errors[_pkl] = _tb[-2000:]  # last 2000 chars — enough for the root cause
+            _load_errors[_pkl] = _tb[-2000:]
             print(f"[model] failed to load {_pkl}: {type(_e).__name__}: {_e}")
             print(_tb)
     else:
         _load_errors[_pkl] = "FILE_NOT_PRESENT"
+        print(f"[model] {_pkl} not present on disk")
+
+_model_ready = True  # loading finished (success or all-failed)
 
 if model is None:
-    print("[model] ⚠️  No model loaded — /predict will return error. Check pkl files.")
+    print("[model] ⚠️  No model loaded — /predict will return error. Check /debug/model.")
+else:
+    print(f"[model] ✅ serving {_active_pkl}")
 
-# Detect which feature schema this model expects (v5 has 18 features, v4/v3/v2 have 14)
-_IS_V5 = _active_pkl == _V5_PKL
+# _IS_V5 is re-evaluated in /predict after model loads.
+# It's also exposed as a helper below for endpoints that run after loading finishes.
+def _is_v5() -> bool:
+    return _active_pkl == _V5_PKL
 
 labels = {0: "Low", 1: "Medium", 2: "High"}
 
+# Feature name lists — selected based on which model is loaded.
 # v5: 7 objective + 4 subjective + 7 engineered = 18 features
 # v2-v4: 7 objective + 7 engineered = 14 features
-if _IS_V5:
-    FEATURE_NAMES = [
-        # ── Objective lifestyle ──
-        "study_hours_per_day", "sleep_hours_per_day", "social_hours_per_day",
-        "physical_activity_hours_per_day", "gpa_norm",
-        "screen_time_hours", "extracurricular_hours",
-        # ── Subjective psychological (NEW v5) ──
-        "anxiety_norm", "social_support_deficit",
-        "career_concern_norm", "mood_norm",
-        # ── Engineered ──
-        "study_sleep_ratio", "sleep_deficit", "burnout_index",
-        "active_hours", "rest_ratio",
-        "productive_vs_leisure", "hourly_load",
-    ]
-else:
-    FEATURE_NAMES = [
-        "study_hours_per_day", "sleep_hours_per_day", "social_hours_per_day",
-        "physical_activity_hours_per_day",
-        "gpa_norm", "screen_time_hours", "extracurricular_hours",
-        "study_sleep_ratio", "sleep_deficit", "burnout_index",
-        "active_hours", "rest_ratio", "productive_vs_leisure", "hourly_load",
-    ]
+_V5_FEATURE_NAMES = [
+    # ── Objective lifestyle ──
+    "study_hours_per_day", "sleep_hours_per_day", "social_hours_per_day",
+    "physical_activity_hours_per_day", "gpa_norm",
+    "screen_time_hours", "extracurricular_hours",
+    # ── Subjective psychological (NEW v5) ──
+    "anxiety_norm", "social_support_deficit",
+    "career_concern_norm", "mood_norm",
+    # ── Engineered ──
+    "study_sleep_ratio", "sleep_deficit", "burnout_index",
+    "active_hours", "rest_ratio",
+    "productive_vs_leisure", "hourly_load",
+]
+_V2_FEATURE_NAMES = [
+    "study_hours_per_day", "sleep_hours_per_day", "social_hours_per_day",
+    "physical_activity_hours_per_day",
+    "gpa_norm", "screen_time_hours", "extracurricular_hours",
+    "study_sleep_ratio", "sleep_deficit", "burnout_index",
+    "active_hours", "rest_ratio", "productive_vs_leisure", "hourly_load",
+]
+
+
+def _get_feature_names() -> list:
+    """Return the feature list for the currently loaded model."""
+    return _V5_FEATURE_NAMES if _is_v5() else _V2_FEATURE_NAMES
+
+
+# Legacy alias — kept for code that captured FEATURE_NAMES at import time.
+# Always access via _get_feature_names() in functions so it reflects the
+# model that was actually loaded.
+FEATURE_NAMES = _V5_FEATURE_NAMES  # default; overridden in /predict at runtime
 
 FEATURE_META = {
     "study_hours_per_day":             {"label": "Study load",         "emoji": "📚", "avg": 6.5,  "high_is_risk": True},
@@ -362,7 +386,8 @@ def _get_feature_importances(m) -> list:
         if base_imps:
             return list(np.mean(base_imps, axis=0))
 
-    return [1.0 / len(FEATURE_NAMES)] * len(FEATURE_NAMES)
+    fn = _get_feature_names()
+    return [1.0 / len(fn)] * len(fn)
 
 
 def get_cached_feature_importance() -> list:
@@ -370,6 +395,7 @@ def get_cached_feature_importance() -> list:
     if _feature_importance_cache is None:
         importances = _get_feature_importances(model)
         total_imp   = sum(importances) or 1.0
+        fn = _get_feature_names()
         _feature_importance_cache = sorted(
             [
                 {
@@ -378,7 +404,7 @@ def get_cached_feature_importance() -> list:
                     "emoji":      FEATURE_META[name]["emoji"],
                     "importance": round(float(imp / total_imp * 100), 1),
                 }
-                for name, imp in zip(FEATURE_NAMES, importances)
+                for name, imp in zip(fn, importances)
             ],
             key=lambda x: x["importance"],
             reverse=True,
@@ -774,7 +800,7 @@ def cohort_stats(request: Request):
 @app.post("/predict")
 def predict(data: dict, request: Request):
     if model is None:
-        return {"error": "Model not loaded — check server logs for pkl load errors"}
+        return {"error": "Model not loaded — check /debug/model for details"}
     try:
         # ── Base features (7) ─────────────────────────────────────────
         study    = float(data.get("study_hours_per_day", 0))
@@ -840,7 +866,7 @@ def predict(data: dict, request: Request):
         }
 
         # Build DataFrame in exact feature order the model was trained on
-        df = pd.DataFrame([feature_vals])[FEATURE_NAMES]
+        df = pd.DataFrame([feature_vals])[_get_feature_names()]
 
         prediction   = model.predict(df)[0]
         result_label = labels.get(int(prediction), "Unknown")
@@ -864,7 +890,7 @@ def predict(data: dict, request: Request):
         ]
         # Include subjective features in driver ranking ONLY if v5 model is loaded
         # AND the frontend supplied real values (not defaults)
-        if _IS_V5:
+        if _is_v5():
             for sub in ["anxiety_norm", "social_support_deficit", "career_concern_norm", "mood_norm"]:
                 if sub in data:  # only count if frontend explicitly sent it
                     BASE_FEATURES.append(sub)
