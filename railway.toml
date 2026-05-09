@@ -1,0 +1,11 @@
+# Railway configuration
+# Minimal config — let Dockerfile CMD handle the start command.
+# Only setting healthcheck timeout to give the app time to load models at startup.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/ping"
+healthcheckTimeout = 120
