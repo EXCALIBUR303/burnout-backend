@@ -26,27 +26,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the backend
 COPY . .
 
-# Build-time smoke test — non-fatal, but prints the exact error to Railway build logs
-# so we can diagnose why v5 fails to load without a full redeploy loop.
-RUN python -c "
-import joblib, traceback, sys
-print('--- v5 build-time smoke test ---')
-print('Python:', sys.version)
-try:
-    import lightgbm as lgb
-    print('lightgbm import OK — version:', lgb.__version__)
-except Exception as e:
-    print('lightgbm import FAILED:', e)
-    traceback.print_exc()
-try:
-    m = joblib.load('stress_model_v5.pkl')
-    print('stress_model_v5.pkl loaded OK — type:', type(m).__name__)
-except Exception as e:
-    print('stress_model_v5.pkl FAILED:', type(e).__name__, e)
-    traceback.print_exc()
-print('--- end smoke test ---')
-" 2>&1 || true
-
 ENV PYTHONUNBUFFERED=1
 
 # Railway provides $PORT at runtime. We MUST use explicit `sh -c` exec form
